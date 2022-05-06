@@ -472,7 +472,7 @@ class CTCWriter(Thread):
     """
     def __init__(
             self, mode, iterator, aligner, fd=sys.stdout, min_coverage=0.90,
-            min_accuracy=0.99, ref_fn=None, groups=None, group_key=None,
+            min_accuracy=0.90, ref_fn=None, groups=None, group_key=None,
     ):
         super().__init__()
         self.fd = fd
@@ -508,7 +508,6 @@ class CTCWriter(Thread):
                 mapping = ctc_data.get('mapping', False)
 
                 self.log.append((read.read_id, len(read.signal)))
-
                 if len(seq) == 0 or mapping is None:
                     continue
 
@@ -517,6 +516,7 @@ class CTCWriter(Thread):
                 refseq = self.aligner.seq(mapping.ctg, mapping.r_st, mapping.r_en)
 
                 if acc < self.min_accuracy or cov < self.min_coverage or 'N' in refseq:
+                    print(acc < self.min_accuracy , cov < self.min_coverage , 'N' in refseq)
                     continue
 
                 self.output.write(
