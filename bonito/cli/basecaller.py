@@ -22,7 +22,6 @@ from bonito.util import column_to_set, load_symbol, load_model, init
 
 
 def main(args):
-
     init(args.seed, args.device)
 
     if args.model_directory in models and args.model_directory not in os.listdir(__models__):
@@ -49,7 +48,6 @@ def main(args):
 
     if args.verbose:
         sys.stderr.write(f"> model basecaller params: {model.config['basecaller']}\n")
-
     basecall = load_symbol(args.model_directory, "basecall")
 
     mods_model = None
@@ -115,13 +113,14 @@ def main(args):
     else:
         ResultsWriter = Writer
 
+    
     results = basecall(
         model, reads, reverse=args.revcomp,
         batchsize=model.config["basecaller"]["batchsize"],
         chunksize=model.config["basecaller"]["chunksize"],
         overlap=model.config["basecaller"]["overlap"]
     )
-
+    
     if mods_model is not None:
         results = process_itemmap(
             partial(call_mods, mods_model), results, n_proc=args.modified_procs
