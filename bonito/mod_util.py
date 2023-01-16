@@ -31,7 +31,7 @@ log.CONSOLE.setLevel(logging.WARNING)
 log.CONSOLE.setFormatter(CustomFormatter())
 
 
-def load_mods_model(mod_bases, bc_model_str, model_path):
+def load_mods_model(mod_bases, bc_model_str, model_path, device=None):
     if mod_bases is not None:
         try:
             bc_model_type, model_version = bc_model_str.split('@')
@@ -50,8 +50,9 @@ def load_mods_model(mod_bases, bc_model_str, model_path):
             basecall_model_version=model_version,
             modified_bases=mod_bases,
             quiet=True,
+            device=device,
         )
-    return load_model(model_path, quiet=True)
+    return load_model(model_path, quiet=True, device=device)
 
 
 def mods_tags_to_str(mods_tags):
@@ -70,7 +71,7 @@ def apply_stride_to_moves(attrs):
 
 
 def call_mods(mods_model, read, read_attrs):
-    if len(read_attrs['sequence']) == 0:
+    if len(read_attrs['sequence']) < 10:
         return read_attrs
     remora_model, remora_metadata = mods_model
     # convert signal move table to remora read format

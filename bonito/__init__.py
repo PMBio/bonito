@@ -3,8 +3,7 @@ from bonito.cli import basecaller, train, evaluate, view, convert, download, exp
 
 modules = ["basecaller", "train", "evaluate", "view", "convert", "download", "export"]
 
-__version__ = "0.5.1+smf"
-
+__version__ = '0.6.2+smf'
 
 def main():
     parser = ArgumentParser("bonito", formatter_class=ArgumentDefaultsHelpFormatter)
