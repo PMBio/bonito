@@ -13,16 +13,33 @@ from itertools import islice as take
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
 from bonito.aligner import align_map, Aligner
+from bonito.reader import read_chunks, Reader
 from bonito.io import CTCWriter, Writer, biofmt
 from bonito.mod_util import call_mods, load_mods_model
 from bonito.cli.download import File, models, __models__
-from bonito.fast5 import get_reads, get_read_groups, read_chunks
 from bonito.multiprocessing import process_cancel, process_itemmap
 from bonito.util import column_to_set, load_symbol, load_model, init
 
 
 def main(args):
     init(args.seed, args.device)
+
+    try:
+        reader = Reader(args.reads_directory, args.recursive)
+        sys.stderr.write("> reading %s\n" % reader.fmt)
+    except FileNotFoundError:
+        sys.stderr.write("> error: no suitable files found in %s\n" % args.reads_directory)
+        exit(1)
+
+    fmt = biofmt(aligned=args.reference is not None)
+
+    if args.reference and args.reference.endswith(".mmi") and fmt.name == "cram":
+        sys.stderr.write("> error: reference cannot be a .mmi when outputting cram\n")
+        exit(1)
+    elif args.reference and fmt.name == "fastq":
+        sys.stderr.write(f"> warning: did you really want {fmt.aligned} {fmt.name}?\n")
+    else:
+        sys.stderr.write(f"> outputting {fmt.aligned} {fmt.name}\n")
 
     if args.model_directory in models and args.model_directory not in os.listdir(__models__):
         sys.stderr.write("> downloading model\n")
@@ -33,7 +50,7 @@ def main(args):
         model = load_model(
             args.model_directory,
             args.device,
-            weights=int(args.weights),
+            weights=args.weights if args.weights > 0 else None,
             chunksize=args.chunksize,
             overlap=args.overlap,
             batchsize=args.batchsize,
@@ -54,7 +71,8 @@ def main(args):
     if args.modified_base_model is not None or args.modified_bases is not None:
         sys.stderr.write("> loading modified base model\n")
         mods_model = load_mods_model(
-            args.modified_bases, args.model_directory, args.modified_base_model
+            args.modified_bases, args.model_directory, args.modified_base_model,
+            device=args.modified_device,
         )
         sys.stderr.write(f"> {mods_model[1]['alphabet_str']}\n")
 
@@ -67,22 +85,12 @@ def main(args):
     else:
         aligner = None
 
-    fmt = biofmt(aligned=args.reference is not None)
-
-    if args.reference and args.reference.endswith(".mmi") and fmt.name == "cram":
-        sys.stderr.write("> error: reference cannot be a .mmi when outputting cram\n")
-        exit(1)
-    elif args.reference and fmt.name == "fastq":
-        sys.stderr.write(f"> warning: did you really want {fmt.aligned} {fmt.name}?\n")
-    else:
-        sys.stderr.write(f"> outputting {fmt.aligned} {fmt.name}\n")
-
     if args.save_ctc and not args.reference:
         sys.stderr.write("> a reference is needed to output ctc training data\n")
         exit(1)
 
     if fmt.name != 'fastq':
-        groups = get_read_groups(
+        groups, num_reads = reader.get_read_groups(
             args.reads_directory, args.model_directory,
             n_proc=8, recursive=args.recursive,
             read_ids=column_to_set(args.read_ids), skip=args.skip,
@@ -90,11 +98,12 @@ def main(args):
         )
     else:
         groups = []
+        num_reads = None
 
-    reads = get_reads(
+    reads = reader.get_reads(
         args.reads_directory, n_proc=8, recursive=args.recursive,
         read_ids=column_to_set(args.read_ids), skip=args.skip,
-        cancel=process_cancel()
+        do_trim=not args.no_trim, cancel=process_cancel()
     )
 
     if args.max_reads:
@@ -115,24 +124,35 @@ def main(args):
 
     
     results = basecall(
-        model, reads, reverse=args.revcomp,
+        model, reads, reverse=args.revcomp, rna=args.rna,
         batchsize=model.config["basecaller"]["batchsize"],
         chunksize=model.config["basecaller"]["chunksize"],
         overlap=model.config["basecaller"]["overlap"]
     )
     
     if mods_model is not None:
-        results = process_itemmap(
-            partial(call_mods, mods_model), results, n_proc=args.modified_procs
-        )
+        if args.modified_device:
+            results = ((k, call_mods(mods_model, k, v)) for k, v in results)
+        else:
+            results = process_itemmap(
+                partial(call_mods, mods_model), results, n_proc=args.modified_procs
+            )
     if aligner:
         results = align_map(aligner, results, n_thread=args.alignment_threads)
 
+    writer_kwargs = {'aligner': aligner,
+                     'group_key': args.model_directory,
+                     'ref_fn': args.reference,
+                     'groups': groups,
+                     'min_qscore': args.min_qscore}
+    if args.save_ctc:
+        writer_kwargs['rna'] = args.rna
+        writer_kwargs['min_accuracy'] = args.min_accuracy_save_ctc
+        
     writer = ResultsWriter(
-        fmt.mode, tqdm(results, desc="> calling", unit=" reads", leave=False),
-        aligner=aligner, group_key=args.model_directory,
-        ref_fn=args.reference, groups=groups,
-    )
+        fmt.mode, tqdm(results, desc="> calling", unit=" reads", leave=False,
+                       total=num_reads, smoothing=0, ascii=True, ncols=100),
+        **writer_kwargs)
 
     t0 = perf_counter()
     writer.start()
@@ -157,13 +177,16 @@ def argparser():
     parser.add_argument("--modified-bases", nargs="+")
     parser.add_argument("--modified-base-model")
     parser.add_argument("--modified-procs", default=8, type=int)
+    parser.add_argument("--modified-device", default=None)
     parser.add_argument("--read-ids")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", default=25, type=int)
-    parser.add_argument("--weights", default="0", type=str)
+    parser.add_argument("--weights", default=0, type=int)
     parser.add_argument("--skip", action="store_true", default=False)
+    parser.add_argument("--no-trim", action="store_true", default=False)
     parser.add_argument("--save-ctc", action="store_true", default=False)
     parser.add_argument("--revcomp", action="store_true", default=False)
+    parser.add_argument("--rna", action="store_true", default=False)
     parser.add_argument("--recursive", action="store_true", default=False)
     quant_parser = parser.add_mutually_exclusive_group(required=False)
     quant_parser.add_argument("--quantize", dest="quantize", action="store_true")
@@ -173,6 +196,8 @@ def argparser():
     parser.add_argument("--chunksize", default=None, type=int)
     parser.add_argument("--batchsize", default=None, type=int)
     parser.add_argument("--max-reads", default=0, type=int)
+    parser.add_argument("--min-qscore", default=0, type=int)
+    parser.add_argument("--min-accuracy-save-ctc", default=0.99, type=float)
     parser.add_argument("--alignment-threads", default=8, type=int)
     parser.add_argument('-v', '--verbose', action='count', default=0)
     return parser
